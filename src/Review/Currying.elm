@@ -66,10 +66,6 @@ forbid =
                         (\declarations state ->
                             ( [], state |> moduleDeclarationsVisitor declarations )
                         )
-                    |> Review.Rule.withDeclarationExitVisitor
-                        (\_ state ->
-                            ( [], { state | rangesToIgnore = [] } )
-                        )
                     |> Review.Rule.withExpressionEnterVisitor expressionEnterVisitor
                     |> Review.Rule.withExpressionExitVisitor
                         (\expressionNode state ->
@@ -593,46 +589,73 @@ expressionEnterVisitor :
     -> ModuleState
     -> ( List (Review.Rule.Error {}), ModuleState )
 expressionEnterVisitor ((Elm.Syntax.Node.Node expressionRange _) as expressionNode) state =
-    if state.rangesToIgnore |> List.head |> isJustAnd (\rangeToIgnore -> rangeToIgnore |> rangeIncludesLocation expressionRange.start) then
-        ( [], state )
+    case state.rangesToIgnore of
+        rangeToIgnore :: remainingRangesToIgnore ->
+            if rangeToIgnore == expressionRange then
+                ( [], { state | rangesToIgnore = remainingRangesToIgnore } )
 
-    else
-        case expressionNode |> syntaxExpressionToApplication of
-            Nothing ->
-                nonApplicationExpressionEnterVisitor expressionNode
-                    state
+            else
+                nonIgnoredExpressionEnterVisitor expressionNode state
 
-            Just application ->
-                ( case application.arguments of
-                    [] ->
-                        []
+        [] ->
+            nonIgnoredExpressionEnterVisitor expressionNode state
 
-                    (_ :: _) as actualArguments ->
-                        case
-                            referenceGetExpectedParameters
-                                { range = application.referenceRange
-                                , name = application.referenceName
-                                }
-                                state
-                        of
-                            Nothing ->
-                                []
 
-                            Just expectedParameters ->
-                                case expectedParameters |> List.drop (actualArguments |> List.length) of
-                                    -- fully applied
-                                    [] ->
-                                        []
+nonIgnoredExpressionEnterVisitor :
+    Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
+    -> ModuleState
+    -> ( List (Review.Rule.Error {}), ModuleState )
+nonIgnoredExpressionEnterVisitor ((Elm.Syntax.Node.Node expressionRange _) as expressionNode) state =
+    case expressionNode |> syntaxExpressionToApplication of
+        Nothing ->
+            nonApplicationExpressionEnterVisitor expressionNode
+                state
 
-                                    (_ :: _) as partiallyAppliedParameters ->
-                                        [ Review.Rule.error
-                                            { message = "Curried function call"
-                                            , details = [ "Not all expected arguments have been provided. Elm will interpret this as as 'partial application', which can be confusing and is also slow. To fix this error, add the missing arguments or use lambda if necessary." ]
-                                            }
-                                            application.referenceRange
-                                        ]
-                , { state | rangesToIgnore = expressionRange :: state.rangesToIgnore }
-                )
+        Just application ->
+            ( case application.arguments of
+                [] ->
+                    []
+
+                (_ :: _) as actualArguments ->
+                    case
+                        referenceGetExpectedParameters
+                            { range = application.referenceRange
+                            , name = application.referenceName
+                            }
+                            state
+                    of
+                        Nothing ->
+                            []
+
+                        Just expectedParameters ->
+                            case expectedParameters |> List.drop (actualArguments |> List.length) of
+                                -- fully applied
+                                [] ->
+                                    []
+
+                                (_ :: _) as partiallyAppliedParameters ->
+                                    [ Review.Rule.error
+                                        { message = "Curried function call"
+                                        , details = [ "Not all expected arguments have been provided. Elm will interpret this as as 'partial application', which can be confusing and is also slow. To fix this error, add the missing arguments or use lambda if necessary." ]
+                                        }
+                                        application.referenceRange
+                                    ]
+            , { state
+                | rangesToIgnore =
+                    listPrependReverse application.calledRangesInnerToOuter
+                        state.rangesToIgnore
+              }
+            )
+
+
+listPrependReverse : List a -> List a -> List a
+listPrependReverse leftReverse right =
+    case leftReverse of
+        [] ->
+            right
+
+        leftLast :: leftBeforeLast ->
+            listPrependReverse leftBeforeLast (leftLast :: right)
 
 
 rangeIncludesLocation : Elm.Syntax.Range.Location -> Elm.Syntax.Range.Range -> Bool
@@ -692,45 +715,63 @@ syntaxExpressionToApplication :
             { referenceRange : Elm.Syntax.Range.Range
             , referenceName : String
             , arguments : List (Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression)
+            , calledRangesInnerToOuter : List Elm.Syntax.Range.Range
             }
 syntaxExpressionToApplication expressionNode =
-    syntaxExpressionToApplicationBefore [] expressionNode
+    syntaxExpressionToApplicationBefore [] [] expressionNode
 
 
 syntaxExpressionToApplicationBefore :
     List (Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression)
+    -> List Elm.Syntax.Range.Range
     -> Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression
     ->
         Maybe
             { referenceRange : Elm.Syntax.Range.Range
             , referenceName : String
             , arguments : List (Elm.Syntax.Node.Node Elm.Syntax.Expression.Expression)
+            , calledRangesInnerToOuter : List Elm.Syntax.Range.Range
             }
-syntaxExpressionToApplicationBefore argumentsAfter (Elm.Syntax.Node.Node expressionRange expression) =
+syntaxExpressionToApplicationBefore argumentsAfter calledRangesInnerToOuterSoFar (Elm.Syntax.Node.Node expressionRange expression) =
     case expression of
         Elm.Syntax.Expression.ParenthesizedExpression inParens ->
-            syntaxExpressionToApplicationBefore argumentsAfter inParens
+            syntaxExpressionToApplicationBefore argumentsAfter
+                ((inParens |> Elm.Syntax.Node.range) :: calledRangesInnerToOuterSoFar)
+                inParens
 
         Elm.Syntax.Expression.Application (called :: arguments) ->
             syntaxExpressionToApplicationBefore
                 (arguments ++ argumentsAfter)
+                ((called |> Elm.Syntax.Node.range) :: calledRangesInnerToOuterSoFar)
                 called
 
         Elm.Syntax.Expression.OperatorApplication "|>" _ argument called ->
             syntaxExpressionToApplicationBefore
                 (argument :: argumentsAfter)
+                ((called |> Elm.Syntax.Node.range) :: calledRangesInnerToOuterSoFar)
                 called
 
         Elm.Syntax.Expression.OperatorApplication "<|" _ called argument ->
             syntaxExpressionToApplicationBefore
                 (argument :: argumentsAfter)
+                ((called |> Elm.Syntax.Node.range) :: calledRangesInnerToOuterSoFar)
                 called
 
         Elm.Syntax.Expression.FunctionOrValue _ name ->
-            Just { referenceRange = expressionRange, referenceName = name, arguments = argumentsAfter }
+            Just
+                { referenceRange = expressionRange
+                , referenceName = name
+                , arguments = argumentsAfter
+                , calledRangesInnerToOuter = calledRangesInnerToOuterSoFar
+                }
 
         Elm.Syntax.Expression.PrefixOperator operator ->
-            Just { referenceRange = expressionRange, referenceName = operator, arguments = argumentsAfter }
+            Just
+                { referenceRange = expressionRange
+                , referenceName = operator
+                , arguments = argumentsAfter
+                , calledRangesInnerToOuter = calledRangesInnerToOuterSoFar
+                }
 
         _ ->
             Nothing

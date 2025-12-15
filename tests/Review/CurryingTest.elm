@@ -36,10 +36,38 @@ a = List.map identity <| list
 """
                     |> Review.Test.run forbid
                     |> Review.Test.expectNoErrors
+        , test "implicitly imported function, fully applied using two <|" <|
+            \() ->
+                """module A exposing (..)
+a = List.map identity <| List.map identity <| list
+"""
+                    |> Review.Test.run forbid
+                    |> Review.Test.expectNoErrors
+        , test "implicitly imported function, fully applied using three <|" <|
+            \() ->
+                """module A exposing (..)
+a = List.map identity <| List.map identity <| List.map identity <| list
+"""
+                    |> Review.Test.run forbid
+                    |> Review.Test.expectNoErrors
         , test "implicitly imported function, fully applied using one |>" <|
             \() ->
                 """module A exposing (..)
 a = list |> List.map identity
+"""
+                    |> Review.Test.run forbid
+                    |> Review.Test.expectNoErrors
+        , test "implicitly imported function, fully applied using two |>" <|
+            \() ->
+                """module A exposing (..)
+a = list |> List.map identity |> List.map identity
+"""
+                    |> Review.Test.run forbid
+                    |> Review.Test.expectNoErrors
+        , test "implicitly imported function, fully applied using three |>" <|
+            \() ->
+                """module A exposing (..)
+a = list |> List.map identity |> List.map identity |> List.map identity
 """
                     |> Review.Test.run forbid
                     |> Review.Test.expectNoErrors
@@ -190,6 +218,13 @@ a = Local 1
                         [ errorUnder "Local"
                             |> Review.Test.atExactly { start = { row = 4, column = 5 }, end = { row = 4, column = 10 } }
                         ]
+        , test "prefix operator, curried, inside fully applied call" <|
+            \() ->
+                """module A exposing (..)
+a = List.map ((+) 0) []
+"""
+                    |> Review.Test.run forbid
+                    |> Review.Test.expectErrors [ errorUnder "(+)" ]
         ]
 
 
