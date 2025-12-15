@@ -1,7 +1,7 @@
 {
     "type": "package",
     "name": "lue-bird/elm-review-currying",
-    "summary": "",
+    "summary": " forbid partially applied functions ",
     "license": "MIT",
     "version": "1.0.0",
     "exposed-modules": [
